@@ -1,5 +1,1182 @@
-{
-  "returncode" : 0,
-  "stdout" : "import { useState, useCallback, useRef, useEffect } from \"react\";\n\n\/\/ ── Timecode core logic ──────────────────────────────────────────────\nconst FRAME_RATES = [\n  { label: \"23.976\", value: 23.976, drop: false, id: \"23976\" },\n  { label: \"24\", value: 24, drop: false, id: \"24\" },\n  { label: \"25\", value: 25, drop: false, id: \"25\" },\n  { label: \"29.97 ND\", value: 29.97, drop: false, id: \"2997nd\" },\n  { label: \"29.97 DF\", value: 29.97, drop: true, id: \"2997df\" },\n  { label: \"30\", value: 30, drop: false, id: \"30\" },\n  { label: \"50\", value: 50, drop: false, id: \"50\" },\n  { label: \"59.94 ND\", value: 59.94, drop: false, id: \"5994nd\" },\n  { label: \"59.94 DF\", value: 59.94, drop: true, id: \"5994df\" },\n  { label: \"60\", value: 60, drop: false, id: \"60\" },\n];\n\nfunction tcToFrames(tc, fps, drop) {\n  const roundFps = Math.round(fps);\n  const parts = tc.split(\/[:;]\/).map(Number);\n  if (parts.length !== 4) return null;\n  const [hh, mm, ss, ff] = parts;\n  if (isNaN(hh) || isNaN(mm) || isNaN(ss) || isNaN(ff)) return null;\n\n  let totalFrames = hh * 3600 * roundFps + mm * 60 * roundFps + ss * roundFps + ff;\n\n  if (drop) {\n    const dropFrames = roundFps === 30 ? 2 : 4;\n    const totalMinutes = 60 * hh + mm;\n    totalFrames -= dropFrames * (totalMinutes - Math.floor(totalMinutes \/ 10));\n  }\n  return totalFrames;\n}\n\nfunction framesToTc(frames, fps, drop) {\n  const roundFps = Math.round(fps);\n  if (frames < 0) frames = 0;\n\n  if (drop) {\n    const dropFrames = roundFps === 30 ? 2 : 4;\n    const framesPerMin = roundFps * 60 - dropFrames;\n    const framesPer10Min = roundFps * 600 - dropFrames * 9;\n    const d = Math.floor(frames \/ framesPer10Min);\n    const m = frames % framesPer10Min;\n    const adj = m < roundFps * 60\n      ? 0\n      : dropFrames + dropFrames * Math.floor((m - roundFps * 60) \/ framesPerMin);\n    frames += dropFrames * 9 * d + adj;\n  }\n\n  const ff = frames % roundFps;\n  frames = Math.floor(frames \/ roundFps);\n  const ss = frames % 60;\n  frames = Math.floor(frames \/ 60);\n  const mm = frames % 60;\n  const hh = Math.floor(frames \/ 60);\n  const sep = drop ? \";\" : \":\";\n  return [hh, mm, ss].map(n => String(n).padStart(2, \"0\")).join(\":\") + sep + String(ff).padStart(2, \"0\");\n}\n\nfunction framesToSec(frames, fps) {\n  return frames \/ fps;\n}\n\nfunction secToHms(sec) {\n  const h = Math.floor(sec \/ 3600);\n  const m = Math.floor((sec % 3600) \/ 60);\n  const s = (sec % 60).toFixed(3);\n  return `${String(h).padStart(2, \"0\")}:${String(m).padStart(2, \"0\")}:${String(Math.floor(s)).padStart(2, \"0\")}.${s.split(\".\")[1]}`;\n}\n\nfunction validateTc(tc) {\n  return \/^\\d{2}[:;]\\d{2}[:;]\\d{2}[:;]\\d{2}$\/.test(tc);\n}\n\n\/\/ ── Component ────────────────────────────────────────────────────────\nexport default function TimecodeTool() {\n  \/\/ Converter state\n  const [convTc, setConvTc] = useState(\"00:00:00:00\");\n  const [convFps, setConvFps] = useState(FRAME_RATES[4]); \/\/ 29.97 DF default\n  const [targetFps, setTargetFps] = useState(FRAME_RATES[2]); \/\/ 25\n  const [convResult, setConvResult] = useState(null);\n  const [convError, setConvError] = useState(\"\");\n\n  \/\/ Duration calculator state\n  const [tcA, setTcA] = useState(\"00:00:00:00\");\n  const [tcB, setTcB] = useState(\"00:00:00:00\");\n  const [durFps, setDurFps] = useState(FRAME_RATES[4]);\n  const [durOp, setDurOp] = useState(\"+\");\n  const [durResult, setDurResult] = useState(null);\n  const [durError, setDurError] = useState(\"\");\n\n  \/\/ Active tab\n  const [tab, setTab] = useState(\"convert\");\n\n  \/\/ ── Converter ──\n  const handleConvert = useCallback(() => {\n    setConvError(\"\");\n    setConvResult(null);\n    if (!validateTc(convTc)) { setConvError(\"タイムコード形式が無効です（例: 01:23:45:12）\"); return; }\n    const frames = tcToFrames(convTc, convFps.value, convFps.drop);\n    if (frames === null) { setConvError(\"変換エラー\"); return; }\n    const realSec = framesToSec(frames, convFps.value);\n    const targetFrames = Math.round(realSec * targetFps.value);\n    const converted = framesToTc(targetFrames, targetFps.value, targetFps.drop);\n    setConvResult({ frames, realSec, converted, targetFrames });\n  }, [convTc, convFps, targetFps]);\n\n  \/\/ ── Duration calc ──\n  const handleDuration = useCallback(() => {\n    setDurError(\"\");\n    setDurResult(null);\n    if (!validateTc(tcA)) { setDurError(\"タイムコードAが無効です\"); return; }\n    if (!validateTc(tcB)) { setDurError(\"タイムコードBが無効です\"); return; }\n    const fa = tcToFrames(tcA, durFps.value, durFps.drop);\n    const fb = tcToFrames(tcB, durFps.value, durFps.drop);\n    if (fa === null || fb === null) { setDurError(\"計算エラー\"); return; }\n    const result = durOp === \"+\" ? fa + fb : fa - fb;\n    if (result < 0) { setDurError(\"結果がマイナスになります\"); return; }\n    const tc = framesToTc(result, durFps.value, durFps.drop);\n    const sec = framesToSec(result, durFps.value);\n    setDurResult({ frames: result, tc, sec, hms: secToHms(sec) });\n  }, [tcA, tcB, durFps, durOp]);\n\n  \/\/ ── Frame Rate Info ──\n  const [infoFps, setInfoFps] = useState(FRAME_RATES[4]);\n\n  \/\/ ── Rundown Calculator ──\n  const DEFAULT_PRESETS = [\n    { id: 1, name: \"CM①\", sec: 180, color: \"#ff6644\" },\n    { id: 2, name: \"CM②\", sec: 120, color: \"#ff6644\" },\n    { id: 3, name: \"提供\", sec: 15, color: \"#ffaa44\" },\n    { id: 4, name: \"提供（頭）\", sec: 10, color: \"#ffaa44\" },\n  ];\n  const [rdFps, setRdFps] = useState(FRAME_RATES[4]);\n  const [rdStartTc, setRdStartTc] = useState(\"00:00:00:00\");\n  const [rdPresets, setRdPresets] = useState(DEFAULT_PRESETS);\n  const [rdNewName, setRdNewName] = useState(\"\");\n  const [rdNewSec, setRdNewSec] = useState(\"\");\n  const [rdRows, setRdRows] = useState([]); \/\/ { label, durSec, startTc, endTc, cumSec }\n  const [rdSelectedPreset, setRdSelectedPreset] = useState(null);\n  const [rdCustomSec, setRdCustomSec] = useState(\"00:00:00:00\");\n  const [rdError, setRdError] = useState(\"\");\n\n  const secToTc = (sec, fps) => {\n    const frames = Math.round(sec * fps.value);\n    return framesToTc(frames, fps.value, fps.drop);\n  };\n\n  const addRdRow = (name, durSec) => {\n    setRdError(\"\");\n    if (!validateTc(rdStartTc) && rdRows.length === 0) {\n      setRdError(\"開始タイムコードが無効です\");\n      return;\n    }\n    const startFrames = rdRows.length === 0\n      ? tcToFrames(rdStartTc, rdFps.value, rdFps.drop)\n      : tcToFrames(rdRows[rdRows.length - 1].endTc, rdFps.value, rdFps.drop);\n    const durFrames = Math.round(durSec * rdFps.value);\n    const endFrames = startFrames + durFrames;\n    const cumSec = (rdRows.length > 0 ? rdRows[rdRows.length - 1].cumSec : 0) + durSec;\n    const newRow = {\n      id: Date.now(),\n      label: name,\n      durSec,\n      startTc: framesToTc(startFrames, rdFps.value, rdFps.drop),\n      endTc: framesToTc(endFrames, rdFps.value, rdFps.drop),\n      cumSec,\n    };\n    setRdRows(prev => [...prev, newRow]);\n  };\n\n  const removeRdRow = (id) => {\n    const idx = rdRows.findIndex(r => r.id === id);\n    if (idx === -1) return;\n    const removed = rdRows[idx];\n    const newRows = rdRows.filter(r => r.id !== id);\n    \/\/ recalculate from idx onwards\n    let recalc = [];\n    for (let i = 0; i < newRows.length; i++) {\n      if (i < idx) { recalc.push(newRows[i]); continue; }\n      const prevEnd = i === 0 ? rdStartTc : recalc[i - 1].endTc;\n      const startF = tcToFrames(prevEnd, rdFps.value, rdFps.drop);\n      const durF = Math.round(newRows[i].durSec * rdFps.value);\n      const cumSec = (i > 0 ? recalc[i - 1].cumSec : 0) + newRows[i].durSec;\n      recalc.push({\n        ...newRows[i],\n        startTc: framesToTc(startF, rdFps.value, rdFps.drop),\n        endTc: framesToTc(startF + durF, rdFps.value, rdFps.drop),\n        cumSec,\n      });\n    }\n    setRdRows(recalc);\n  };\n\n  const addPreset = () => {\n    if (!rdNewName.trim() || !rdNewSec || isNaN(Number(rdNewSec)) || Number(rdNewSec) <= 0) return;\n    setRdPresets(prev => [...prev, { id: Date.now(), name: rdNewName.trim(), sec: Number(rdNewSec), color: \"#6688ff\" }]);\n    setRdNewName(\"\"); setRdNewSec(\"\");\n  };\n\n  const removePreset = (id) => setRdPresets(prev => prev.filter(p => p.id !== id));\n\n  const fmtSec = (sec) => {\n    const m = Math.floor(sec \/ 60);\n    const s = sec % 60;\n    return m > 0 ? `${m}分${s > 0 ? s + \"秒\" : \"\"}` : `${s}秒`;\n  };\n\n\n  \/\/ ── Stopwatch ──\n  const [swFps, setSwFps] = useState(FRAME_RATES[4]);\n  const [swRunning, setSwRunning] = useState(false);\n  const [swElapsed, setSwElapsed] = useState(0); \/\/ ms\n  const [swLaps, setSwLaps] = useState([]); \/\/ { label, elapsed, lapTime }\n  const [swLapLabel, setSwLapLabel] = useState(\"\");\n  const swStartRef = useRef(null);\n  const swBaseRef = useRef(0);\n  const swRafRef = useRef(null);\n\n  const swTick = useCallback(() => {\n    setSwElapsed(swBaseRef.current + (Date.now() - swStartRef.current));\n    swRafRef.current = requestAnimationFrame(swTick);\n  }, []);\n\n  const swStart = useCallback(() => {\n    swStartRef.current = Date.now();\n    setSwRunning(true);\n    swRafRef.current = requestAnimationFrame(swTick);\n  }, [swTick]);\n\n  const swStop = useCallback(() => {\n    cancelAnimationFrame(swRafRef.current);\n    swBaseRef.current = swBaseRef.current + (Date.now() - swStartRef.current);\n    setSwRunning(false);\n  }, []);\n\n  const swReset = useCallback(() => {\n    cancelAnimationFrame(swRafRef.current);\n    swBaseRef.current = 0;\n    swStartRef.current = null;\n    setSwRunning(false);\n    setSwElapsed(0);\n    setSwLaps([]);\n    setSwLapLabel(\"\");\n  }, []);\n\n  const swLap = useCallback(() => {\n    const current = swBaseRef.current + (Date.now() - swStartRef.current);\n    const prevElapsed = swLaps.length > 0 ? swLaps[swLaps.length - 1].elapsed : 0;\n    setSwLaps(prev => [...prev, {\n      label: swLapLabel || `ラップ ${prev.length + 1}`,\n      elapsed: current,\n      lapTime: current - prevElapsed,\n    }]);\n    setSwLapLabel(\"\");\n  }, [swLaps, swLapLabel]);\n\n  useEffect(() => () => cancelAnimationFrame(swRafRef.current), []);\n\n  function msToTc(ms, fps, drop) {\n    const frames = Math.floor(ms \/ 1000 * fps.value);\n    return framesToTc(frames, fps.value, fps.drop);\n  }\n\n  function msToDisplay(ms) {\n    const h = Math.floor(ms \/ 3600000);\n    const m = Math.floor((ms % 3600000) \/ 60000);\n    const s = Math.floor((ms % 60000) \/ 1000);\n    const cs = Math.floor((ms % 1000) \/ 10);\n    return `${String(h).padStart(2,\"0\")}:${String(m).padStart(2,\"0\")}:${String(s).padStart(2,\"0\")}.${String(cs).padStart(2,\"0\")}`;\n  }\n\n  return (\n    <div style={{\n      minHeight: \"100vh\",\n      background: \"#0a0a0f\",\n      fontFamily: \"'IBM Plex Mono', 'Courier New', monospace\",\n      color: \"#e0e0e0\",\n      padding: \"0\",\n    }}>\n      {\/* Header *\/}\n      <header style={{\n        borderBottom: \"1px solid #1e3a2f\",\n        padding: \"20px 32px\",\n        display: \"flex\",\n        alignItems: \"center\",\n        gap: \"16px\",\n        background: \"linear-gradient(180deg, #0d1a12 0%, #0a0a0f 100%)\",\n      }}>\n        <div style={{\n          width: 36, height: 36,\n          border: \"2px solid #00ff88\",\n          borderRadius: 4,\n          display: \"flex\", alignItems: \"center\", justifyContent: \"center\",\n          fontSize: 14, color: \"#00ff88\", fontWeight: 700,\n          boxShadow: \"0 0 12px #00ff8844\",\n        }}>TC<\/div>\n        <div>\n          <div style={{ fontSize: 18, fontWeight: 700, color: \"#00ff88\", letterSpacing: \"0.1em\" }}>\n            TIMECODE STUDIO\n          <\/div>\n          <div style={{ fontSize: 10, color: \"#446655\", letterSpacing: \"0.25em\" }}>\n            BROADCAST & POST-PRODUCTION TOOL\n          <\/div>\n        <\/div>\n        <div style={{ marginLeft: \"auto\", display: \"flex\", gap: 8 }}>\n          {[\"convert\", \"duration\", \"stopwatch\", \"rundown\", \"frameinfo\"].map(t => (\n            <button\n              key={t}\n              onClick={() => setTab(t)}\n              style={{\n                padding: \"6px 14px\",\n                background: tab === t ? \"#00ff88\" : \"transparent\",\n                color: tab === t ? \"#0a0a0f\" : \"#446655\",\n                border: `1px solid ${tab === t ? \"#00ff88\" : \"#1e3a2f\"}`,\n                borderRadius: 3,\n                cursor: \"pointer\",\n                fontSize: 10,\n                fontFamily: \"inherit\",\n                fontWeight: 700,\n                letterSpacing: \"0.1em\",\n                transition: \"all 0.15s\",\n              }}\n            >\n              {t === \"convert\" ? \"TC変換\" : t === \"duration\" ? \"尺計算\" : t === \"stopwatch\" ? \"原稿計測\" : t === \"rundown\" ? \"番組表計算\" : \"FPS情報\"}\n            <\/button>\n          ))}\n        <\/div>\n      <\/header>\n\n      <main style={{ padding: \"32px\", maxWidth: 800, margin: \"0 auto\" }}>\n\n        {\/* ── TC Converter ── *\/}\n        {tab === \"convert\" && (\n          <section>\n            <SectionTitle>タイムコード変換<\/SectionTitle>\n            <p style={{ color: \"#446655\", fontSize: 11, marginBottom: 24, letterSpacing: \"0.1em\" }}>\n              異なるフレームレート間でタイムコードを変換します\n            <\/p>\n\n            <div style={{ display: \"grid\", gridTemplateColumns: \"1fr auto 1fr\", gap: 16, alignItems: \"end\", marginBottom: 20 }}>\n              <div>\n                <Label>入力タイムコード<\/Label>\n                <TcInput value={convTc} onChange={setConvTc} \/>\n                <Label style={{ marginTop: 10 }}>フレームレート<\/Label>\n                <FpsSelect value={convFps} onChange={setConvFps} \/>\n              <\/div>\n              <div style={{ textAlign: \"center\", paddingBottom: 8, color: \"#00ff88\", fontSize: 20 }}>→<\/div>\n              <div>\n                <Label>変換先フレームレート<\/Label>\n                <FpsSelect value={targetFps} onChange={setTargetFps} \/>\n              <\/div>\n            <\/div>\n\n            <ActionButton onClick={handleConvert}>変換する<\/ActionButton>\n\n            {convError && <ErrorBox>{convError}<\/ErrorBox>}\n\n            {convResult && (\n              <ResultBox>\n                <ResultRow label=\"変換結果\" value={convResult.converted} highlight \/>\n                <ResultRow label=\"元フレーム数\" value={`${convResult.frames} frames`} \/>\n                <ResultRow label=\"実時間\" value={`${convResult.realSec.toFixed(6)} 秒`} \/>\n                <ResultRow label=\"変換後フレーム数\" value={`${convResult.targetFrames} frames`} \/>\n                <ResultRow label=\"HH:MM:SS.mmm\" value={secToHms(convResult.realSec)} \/>\n              <\/ResultBox>\n            )}\n          <\/section>\n        )}\n\n        {\/* ── Duration Calc ── *\/}\n        {tab === \"duration\" && (\n          <section>\n            <SectionTitle>尺計算（デュレーション）<\/SectionTitle>\n            <p style={{ color: \"#446655\", fontSize: 11, marginBottom: 24, letterSpacing: \"0.1em\" }}>\n              タイムコードの加算・減算を行います\n            <\/p>\n\n            <div style={{ marginBottom: 16 }}>\n              <Label>フレームレート<\/Label>\n              <FpsSelect value={durFps} onChange={setDurFps} \/>\n            <\/div>\n\n            <div style={{ display: \"grid\", gridTemplateColumns: \"1fr auto 1fr\", gap: 12, alignItems: \"center\", marginBottom: 20 }}>\n              <div>\n                <Label>タイムコード A<\/Label>\n                <TcInput value={tcA} onChange={setTcA} \/>\n              <\/div>\n              <div style={{ textAlign: \"center\" }}>\n                <Label>演算<\/Label>\n                <div style={{ display: \"flex\", gap: 6 }}>\n                  {[\"+\", \"-\"].map(op => (\n                    <button\n                      key={op}\n                      onClick={() => setDurOp(op)}\n                      style={{\n                        width: 40, height: 40,\n                        background: durOp === op ? \"#00ff88\" : \"#0d1a12\",\n                        color: durOp === op ? \"#0a0a0f\" : \"#00ff88\",\n                        border: `1px solid #00ff88`,\n                        borderRadius: 3,\n                        cursor: \"pointer\",\n                        fontSize: 18,\n                        fontFamily: \"inherit\",\n                        fontWeight: 700,\n                        transition: \"all 0.15s\",\n                      }}\n                    >{op}<\/button>\n                  ))}\n                <\/div>\n              <\/div>\n              <div>\n                <Label>タイムコード B<\/Label>\n                <TcInput value={tcB} onChange={setTcB} \/>\n              <\/div>\n            <\/div>\n\n            <ActionButton onClick={handleDuration}>計算する<\/ActionButton>\n\n            {durError && <ErrorBox>{durError}<\/ErrorBox>}\n\n            {durResult && (\n              <ResultBox>\n                <ResultRow label=\"計算結果\" value={durResult.tc} highlight \/>\n                <ResultRow label=\"総フレーム数\" value={`${durResult.frames} frames`} \/>\n                <ResultRow label=\"実時間（秒）\" value={`${durResult.sec.toFixed(6)} 秒`} \/>\n                <ResultRow label=\"HH:MM:SS.mmm\" value={durResult.hms} \/>\n              <\/ResultBox>\n            )}\n          <\/section>\n        )}\n\n        {\/* ── Stopwatch ── *\/}\n        {tab === \"stopwatch\" && (\n          <section>\n            <SectionTitle>原稿読み計測<\/SectionTitle>\n            <p style={{ color: \"#446655\", fontSize: 11, marginBottom: 24, letterSpacing: \"0.1em\" }}>\n              原稿のデュレーションをラップ記録つきで計測します\n            <\/p>\n\n            {\/* FPS selector *\/}\n            <div style={{ marginBottom: 20 }}>\n              <Label>フレームレート<\/Label>\n              <FpsSelect value={swFps} onChange={setSwFps} \/>\n            <\/div>\n\n            {\/* Main display *\/}\n            <div style={{\n              background: \"#060e08\",\n              border: \"1px solid #1e3a2f\",\n              borderRadius: 8,\n              padding: \"28px 24px\",\n              marginBottom: 20,\n              textAlign: \"center\",\n            }}>\n              <div style={{\n                fontSize: 52,\n                fontWeight: 700,\n                color: swRunning ? \"#00ff88\" : swElapsed > 0 ? \"#aaeebb\" : \"#446655\",\n                letterSpacing: \"0.08em\",\n                textShadow: swRunning ? \"0 0 24px #00ff8866\" : \"none\",\n                transition: \"color 0.3s, text-shadow 0.3s\",\n                fontVariantNumeric: \"tabular-nums\",\n                lineHeight: 1,\n                marginBottom: 12,\n              }}>\n                {msToDisplay(swElapsed)}\n              <\/div>\n              <div style={{\n                fontSize: 16,\n                color: swRunning ? \"#446655\" : \"#2a4a3a\",\n                letterSpacing: \"0.2em\",\n              }}>\n                {msToTc(swElapsed, swFps)}\n              <\/div>\n            <\/div>\n\n            {\/* Controls *\/}\n            <div style={{ display: \"flex\", gap: 10, marginBottom: 20, flexWrap: \"wrap\" }}>\n              {!swRunning ? (\n                <button onClick={swStart} style={btnStyle(\"#00ff88\", \"#0a0a0f\")}>\n                  {swElapsed > 0 ? \"▶ 再開\" : \"▶ スタート\"}\n                <\/button>\n              ) : (\n                <button onClick={swStop} style={btnStyle(\"#ffaa44\", \"#0a0a0f\")}>\n                  ⏸ 一時停止\n                <\/button>\n              )}\n              {swRunning && (\n                <button onClick={swLap} style={btnStyle(\"transparent\", \"#00ff88\", \"#00ff88\")}>\n                  ◎ ラップ記録\n                <\/button>\n              )}\n              <button onClick={swReset} style={btnStyle(\"transparent\", \"#446655\", \"#1e3a2f\")}>\n                ↺ リセット\n              <\/button>\n            <\/div>\n\n            {\/* Lap label input *\/}\n            {swRunning && (\n              <div style={{ marginBottom: 20 }}>\n                <Label>次のラップのラベル（任意）<\/Label>\n                <input\n                  value={swLapLabel}\n                  onChange={e => setSwLapLabel(e.target.value)}\n                  placeholder=\"例：導入部、Aパート、エンドロール...\"\n                  style={{\n                    width: \"100%\",\n                    background: \"#0d1a12\",\n                    border: \"1px solid #1e3a2f\",\n                    borderRadius: 4,\n                    padding: \"9px 14px\",\n                    color: \"#c0c0c0\",\n                    fontFamily: \"inherit\",\n                    fontSize: 13,\n                    outline: \"none\",\n                    boxSizing: \"border-box\",\n                  }}\n                \/>\n              <\/div>\n            )}\n\n            {\/* Lap list *\/}\n            {swLaps.length > 0 && (\n              <div style={{ background: \"#0d1a12\", border: \"1px solid #1e3a2f\", borderRadius: 6, overflow: \"hidden\" }}>\n                <div style={{\n                  display: \"grid\",\n                  gridTemplateColumns: \"auto 1fr 1fr 1fr\",\n                  gap: 0,\n                  padding: \"8px 16px\",\n                  borderBottom: \"1px solid #1e3a2f\",\n                }}>\n                  {[\"#\", \"ラベル\", \"ラップ尺\", \"累計\"].map(h => (\n                    <div key={h} style={{ fontSize: 9, color: \"#446655\", letterSpacing: \"0.2em\", textTransform: \"uppercase\" }}>{h}<\/div>\n                  ))}\n                <\/div>\n                {swLaps.map((lap, i) => (\n                  <div key={i} style={{\n                    display: \"grid\",\n                    gridTemplateColumns: \"auto 1fr 1fr 1fr\",\n                    gap: 0,\n                    padding: \"10px 16px\",\n                    borderBottom: i < swLaps.length - 1 ? \"1px solid #112210\" : \"none\",\n                    background: i % 2 === 0 ? \"transparent\" : \"#060e08\",\n                  }}>\n                    <div style={{ fontSize: 11, color: \"#446655\", paddingRight: 16 }}>{i + 1}<\/div>\n                    <div style={{ fontSize: 12, color: \"#c0c0c0\" }}>{lap.label}<\/div>\n                    <div style={{ fontSize: 12, color: \"#00ff88\", fontWeight: 700 }}>\n                      {msToTc(lap.lapTime, swFps)}\n                      <div style={{ fontSize: 10, color: \"#446655\" }}>{msToDisplay(lap.lapTime)}<\/div>\n                    <\/div>\n                    <div style={{ fontSize: 12, color: \"#aaeebb\" }}>\n                      {msToTc(lap.elapsed, swFps)}\n                      <div style={{ fontSize: 10, color: \"#446655\" }}>{msToDisplay(lap.elapsed)}<\/div>\n                    <\/div>\n                  <\/div>\n                ))}\n                {\/* Total *\/}\n                <div style={{\n                  display: \"grid\",\n                  gridTemplateColumns: \"auto 1fr 1fr 1fr\",\n                  gap: 0,\n                  padding: \"12px 16px\",\n                  borderTop: \"2px solid #1e3a2f\",\n                  background: \"#060e08\",\n                }}>\n                  <div \/>\n                  <div style={{ fontSize: 10, color: \"#446655\", letterSpacing: \"0.15em\" }}>TOTAL<\/div>\n                  <div \/>\n                  <div style={{ fontSize: 14, color: \"#00ff88\", fontWeight: 700 }}>\n                    {msToTc(swElapsed, swFps)}\n                    <div style={{ fontSize: 10, color: \"#446655\" }}>{msToDisplay(swElapsed)}<\/div>\n                  <\/div>\n                <\/div>\n              <\/div>\n            )}\n          <\/section>\n        )}\n\n\n        {\/* ── Rundown Calculator ── *\/}\n        {tab === \"rundown\" && (\n          <section>\n            <SectionTitle>番組表計算<\/SectionTitle>\n            <p style={{ color: \"#446655\", fontSize: 11, marginBottom: 24, letterSpacing: \"0.1em\" }}>\n              CM・提供の尺を順番に積み上げて、各タイムコードを自動計算します\n            <\/p>\n\n            {\/* Settings row *\/}\n            <div style={{ display: \"grid\", gridTemplateColumns: \"1fr 1fr\", gap: 16, marginBottom: 24 }}>\n              <div>\n                <Label>フレームレート<\/Label>\n                <FpsSelect value={rdFps} onChange={setRdFps} \/>\n              <\/div>\n              <div>\n                <Label>開始タイムコード<\/Label>\n                <TcInput value={rdStartTc} onChange={setRdStartTc} \/>\n              <\/div>\n            <\/div>\n\n            {\/* Presets *\/}\n            <div style={{ background: \"#0d1a12\", border: \"1px solid #1e3a2f\", borderRadius: 6, padding: 16, marginBottom: 20 }}>\n              <Label>プリセット尺<\/Label>\n              <div style={{ display: \"flex\", flexWrap: \"wrap\", gap: 8, marginBottom: 12 }}>\n                {rdPresets.map(p => (\n                  <div key={p.id} style={{ display: \"flex\", alignItems: \"center\", gap: 0 }}>\n                    <button\n                      onClick={() => addRdRow(p.name, p.sec)}\n                      style={{\n                        background: \"#060e08\",\n                        color: p.color,\n                        border: `1px solid ${p.color}66`,\n                        borderRight: \"none\",\n                        borderRadius: \"4px 0 0 4px\",\n                        padding: \"7px 14px\",\n                        fontFamily: \"inherit\",\n                        fontSize: 12,\n                        fontWeight: 700,\n                        cursor: \"pointer\",\n                        letterSpacing: \"0.05em\",\n                      }}\n                    >\n                      {p.name} <span style={{ color: \"#446655\", fontWeight: 400 }}>{fmtSec(p.sec)}<\/span>\n                    <\/button>\n                    <button\n                      onClick={() => removePreset(p.id)}\n                      style={{\n                        background: \"#060e08\",\n                        color: \"#446655\",\n                        border: `1px solid ${p.color}66`,\n                        borderRadius: \"0 4px 4px 0\",\n                        padding: \"7px 8px\",\n                        fontFamily: \"inherit\",\n                        fontSize: 11,\n                        cursor: \"pointer\",\n                      }}\n                    >✕<\/button>\n                  <\/div>\n                ))}\n              <\/div>\n\n              {\/* Add preset *\/}\n              <div style={{ display: \"flex\", gap: 8, alignItems: \"center\" }}>\n                <input\n                  value={rdNewName}\n                  onChange={e => setRdNewName(e.target.value)}\n                  placeholder=\"名前（例：CM③）\"\n                  style={{ flex: 2, background: \"#060e08\", border: \"1px solid #1e3a2f\", borderRadius: 4, padding: \"7px 12px\", color: \"#c0c0c0\", fontFamily: \"inherit\", fontSize: 12, outline: \"none\" }}\n                \/>\n                <input\n                  value={rdNewSec}\n                  onChange={e => setRdNewSec(e.target.value)}\n                  placeholder=\"秒数（例：90）\"\n                  type=\"number\"\n                  min=\"1\"\n                  style={{ flex: 1, background: \"#060e08\", border: \"1px solid #1e3a2f\", borderRadius: 4, padding: \"7px 12px\", color: \"#c0c0c0\", fontFamily: \"inherit\", fontSize: 12, outline: \"none\" }}\n                \/>\n                <button\n                  onClick={addPreset}\n                  style={{ background: \"#1e3a2f\", color: \"#00ff88\", border: \"1px solid #00ff8844\", borderRadius: 4, padding: \"7px 14px\", fontFamily: \"inherit\", fontSize: 12, fontWeight: 700, cursor: \"pointer\" }}\n                >＋ 追加<\/button>\n              <\/div>\n            <\/div>\n\n            {\/* Manual add *\/}\n            <div style={{ background: \"#0d1a12\", border: \"1px solid #1e3a2f\", borderRadius: 6, padding: 16, marginBottom: 20 }}>\n              <Label>手動で追加（タイムコードで尺を指定）<\/Label>\n              <div style={{ display: \"flex\", gap: 8, alignItems: \"center\" }}>\n                <div style={{ flex: 1 }}>\n                  <TcInput value={rdCustomSec} onChange={setRdCustomSec} \/>\n                <\/div>\n                <button\n                  onClick={() => {\n                    if (!validateTc(rdCustomSec)) return;\n                    const frames = tcToFrames(rdCustomSec, rdFps.value, rdFps.drop);\n                    if (!frames || frames <= 0) return;\n                    const sec = frames \/ rdFps.value;\n                    addRdRow(`手動 ${rdCustomSec}`, sec);\n                    setRdCustomSec(\"00:00:00:00\");\n                  }}\n                  style={{ background: \"#00ff88\", color: \"#0a0a0f\", border: \"none\", borderRadius: 4, padding: \"9px 20px\", fontFamily: \"inherit\", fontSize: 12, fontWeight: 700, cursor: \"pointer\", letterSpacing: \"0.1em\", whiteSpace: \"nowrap\" }}\n                >追加<\/button>\n              <\/div>\n            <\/div>\n\n            {rdError && <ErrorBox>{rdError}<\/ErrorBox>}\n\n            {\/* Rundown table *\/}\n            {rdRows.length > 0 && (\n              <div style={{ background: \"#0d1a12\", border: \"1px solid #1e3a2f\", borderRadius: 6, overflow: \"hidden\", marginBottom: 16 }}>\n                {\/* Header *\/}\n                <div style={{ display: \"grid\", gridTemplateColumns: \"auto 1fr 80px 1fr 1fr 36px\", gap: 0, padding: \"8px 16px\", borderBottom: \"1px solid #1e3a2f\", background: \"#060e08\" }}>\n                  {[\"#\", \"区分\", \"尺\", \"IN\", \"OUT\", \"\"].map((h, i) => (\n                    <div key={i} style={{ fontSize: 9, color: \"#446655\", letterSpacing: \"0.2em\", textTransform: \"uppercase\" }}>{h}<\/div>\n                  ))}\n                <\/div>\n                {rdRows.map((row, i) => (\n                  <div key={row.id} style={{\n                    display: \"grid\",\n                    gridTemplateColumns: \"auto 1fr 80px 1fr 1fr 36px\",\n                    gap: 0,\n                    padding: \"11px 16px\",\n                    borderBottom: i < rdRows.length - 1 ? \"1px solid #112210\" : \"none\",\n                    background: i % 2 === 0 ? \"transparent\" : \"#060e08\",\n                    alignItems: \"center\",\n                  }}>\n                    <div style={{ fontSize: 11, color: \"#446655\", paddingRight: 12 }}>{i + 1}<\/div>\n                    <div style={{ fontSize: 13, color: \"#e0e0e0\", fontWeight: 700 }}>{row.label}<\/div>\n                    <div style={{ fontSize: 12, color: \"#ffaa44\" }}>{fmtSec(row.durSec)}<\/div>\n                    <div style={{ fontSize: 12, color: \"#aaeebb\", letterSpacing: \"0.05em\" }}>{row.startTc}<\/div>\n                    <div style={{ fontSize: 13, color: \"#00ff88\", fontWeight: 700, letterSpacing: \"0.05em\", textShadow: \"0 0 8px #00ff8844\" }}>{row.endTc}<\/div>\n                    <button\n                      onClick={() => removeRdRow(row.id)}\n                      style={{ background: \"transparent\", color: \"#446655\", border: \"none\", cursor: \"pointer\", fontSize: 14, padding: \"2px 6px\" }}\n                    >✕<\/button>\n                  <\/div>\n                ))}\n                {\/* Total row *\/}\n                <div style={{ display: \"grid\", gridTemplateColumns: \"auto 1fr 80px 1fr 1fr 36px\", gap: 0, padding: \"12px 16px\", borderTop: \"2px solid #1e3a2f\", background: \"#060e08\", alignItems: \"center\" }}>\n                  <div \/>\n                  <div style={{ fontSize: 10, color: \"#446655\", letterSpacing: \"0.2em\" }}>TOTAL<\/div>\n                  <div style={{ fontSize: 13, color: \"#ffaa44\", fontWeight: 700 }}>{fmtSec(rdRows[rdRows.length - 1].cumSec)}<\/div>\n                  <div \/>\n                  <div style={{ fontSize: 15, color: \"#00ff88\", fontWeight: 700, textShadow: \"0 0 12px #00ff8866\" }}>\n                    {rdRows[rdRows.length - 1].endTc}\n                  <\/div>\n                  <div \/>\n                <\/div>\n              <\/div>\n            )}\n\n            {rdRows.length > 0 && (\n              <button\n                onClick={() => setRdRows([])}\n                style={{ background: \"transparent\", color: \"#446655\", border: \"1px solid #1e3a2f\", borderRadius: 4, padding: \"8px 16px\", fontFamily: \"inherit\", fontSize: 11, cursor: \"pointer\", letterSpacing: \"0.1em\" }}\n              >↺ 表をリセット<\/button>\n            )}\n          <\/section>\n        )}\n\n        {tab === \"frameinfo\" && (\n          <section>\n            <SectionTitle>フレームレート情報<\/SectionTitle>\n            <p style={{ color: \"#446655\", fontSize: 11, marginBottom: 24, letterSpacing: \"0.1em\" }}>\n              各フレームレートの特性と使用シーンを確認できます\n            <\/p>\n\n            <div style={{ marginBottom: 24 }}>\n              <Label>フレームレートを選択<\/Label>\n              <FpsSelect value={infoFps} onChange={setInfoFps} \/>\n            <\/div>\n\n            <FpsInfoCard fps={infoFps} \/>\n          <\/section>\n        )}\n      <\/main>\n    <\/div>\n  );\n}\n\n\/\/ ── Sub-components ───────────────────────────────────────────────────\n\nfunction SectionTitle({ children }) {\n  return (\n    <h2 style={{\n      fontSize: 13,\n      fontWeight: 700,\n      color: \"#00ff88\",\n      letterSpacing: \"0.2em\",\n      borderLeft: \"3px solid #00ff88\",\n      paddingLeft: 12,\n      marginBottom: 8,\n      textTransform: \"uppercase\",\n    }}>{children}<\/h2>\n  );\n}\n\nfunction Label({ children, style }) {\n  return (\n    <div style={{\n      fontSize: 10,\n      color: \"#446655\",\n      letterSpacing: \"0.2em\",\n      marginBottom: 6,\n      textTransform: \"uppercase\",\n      ...style,\n    }}>{children}<\/div>\n  );\n}\n\n\/\/ 数字8桁 → \"HH:MM:SS:FF\" に自動フォーマット\nfunction formatTcInput(digits) {\n  const d = digits.padStart(8, \"0\");\n  return `${d.slice(0,2)}:${d.slice(2,4)}:${d.slice(4,6)}:${d.slice(6,8)}`;\n}\n\nfunction TcInput({ value, onChange, drop }) {\n  const [showPad, setShowPad] = useState(false);\n  const [digits, setDigits] = useState(\"00000000\");\n  const padRef = useRef(null);\n\n  \/\/ 外部valueが変わったとき digits を同期\n  useEffect(() => {\n    const raw = value.replace(\/[^0-9]\/g, \"\").slice(0, 8).padStart(8, \"0\");\n    setDigits(raw);\n  }, [value]);\n\n  \/\/ パッド外クリックで閉じる\n  useEffect(() => {\n    if (!showPad) return;\n    const handler = (e) => {\n      if (padRef.current && !padRef.current.contains(e.target)) setShowPad(false);\n    };\n    document.addEventListener(\"mousedown\", handler);\n    return () => document.removeEventListener(\"mousedown\", handler);\n  }, [showPad]);\n\n  const pushDigit = (d) => {\n    const next = (digits + d).slice(-8);\n    setDigits(next);\n    onChange(formatTcInput(next));\n  };\n\n  const backspace = () => {\n    const next = (\"0\" + digits.slice(0, 7)).padStart(8, \"0\");\n    setDigits(next);\n    onChange(formatTcInput(next));\n  };\n\n  const clear = () => {\n    setDigits(\"00000000\");\n    onChange(\"00:00:00:00\");\n  };\n\n  const handleKeyInput = (e) => {\n    const raw = e.target.value.replace(\/[^0-9]\/g, \"\").slice(0, 8);\n    const next = raw.padStart(8, \"0\");\n    setDigits(next);\n    onChange(formatTcInput(next));\n  };\n\n  const sep = drop ? \";\" : \":\";\n  const display = formatTcInput(digits).replace(\/:\/g, sep);\n\n  return (\n    <div style={{ position: \"relative\" }} ref={padRef}>\n      <div style={{ display: \"flex\", gap: 0 }}>\n        <input\n          value={display}\n          onChange={handleKeyInput}\n          placeholder={`00${sep}00${sep}00${sep}00`}\n          style={{\n            flex: 1,\n            background: \"#0d1a12\",\n            border: \"1px solid #1e3a2f\",\n            borderRight: \"none\",\n            borderRadius: \"4px 0 0 4px\",\n            padding: \"10px 14px\",\n            color: \"#00ff88\",\n            fontFamily: \"inherit\",\n            fontSize: 18,\n            letterSpacing: \"0.15em\",\n            outline: \"none\",\n            boxSizing: \"border-box\",\n          }}\n          onFocus={e => e.target.style.borderColor = \"#00ff88\"}\n          onBlur={e => e.target.style.borderColor = \"#1e3a2f\"}\n        \/>\n        <button\n          onMouseDown={e => { e.preventDefault(); setShowPad(v => !v); }}\n          style={{\n            background: showPad ? \"#00ff88\" : \"#0d1a12\",\n            color: showPad ? \"#0a0a0f\" : \"#446655\",\n            border: \"1px solid #1e3a2f\",\n            borderRadius: \"0 4px 4px 0\",\n            padding: \"0 12px\",\n            cursor: \"pointer\",\n            fontSize: 16,\n            fontFamily: \"inherit\",\n          }}\n          title=\"テンキー入力\"\n        >⌨<\/button>\n      <\/div>\n\n      {\/* Tenkey Pad *\/}\n      {showPad && (\n        <div style={{\n          position: \"absolute\",\n          top: \"calc(100% + 6px)\",\n          left: 0,\n          zIndex: 100,\n          background: \"#0d1a12\",\n          border: \"1px solid #00ff8844\",\n          borderRadius: 8,\n          padding: 12,\n          boxShadow: \"0 8px 32px #00000088\",\n          width: 200,\n        }}>\n          {\/* Display *\/}\n          <div style={{\n            background: \"#060e08\",\n            border: \"1px solid #1e3a2f\",\n            borderRadius: 4,\n            padding: \"8px 12px\",\n            marginBottom: 10,\n            textAlign: \"right\",\n            fontSize: 20,\n            color: \"#00ff88\",\n            letterSpacing: \"0.15em\",\n            fontWeight: 700,\n          }}>\n            {display}\n          <\/div>\n          {\/* Keys *\/}\n          <div style={{ display: \"grid\", gridTemplateColumns: \"repeat(3, 1fr)\", gap: 6 }}>\n            {[7,8,9,4,5,6,1,2,3].map(n => (\n              <button key={n} onClick={() => pushDigit(String(n))} style={tkBtn(\"#0d1a12\", \"#e0e0e0\")}>\n                {n}\n              <\/button>\n            ))}\n            <button onClick={clear} style={tkBtn(\"#1a0d0d\", \"#ff6644\")}>C<\/button>\n            <button onClick={() => pushDigit(\"0\")} style={tkBtn(\"#0d1a12\", \"#e0e0e0\")}>0<\/button>\n            <button onClick={backspace} style={tkBtn(\"#1a1a0d\", \"#ffaa44\")}>⌫<\/button>\n          <\/div>\n          <button\n            onClick={() => setShowPad(false)}\n            style={{ ...tkBtn(\"#1e3a2f\", \"#00ff88\"), width: \"100%\", marginTop: 8, letterSpacing: \"0.1em\", fontSize: 11 }}\n          >確定 ✓<\/button>\n        <\/div>\n      )}\n    <\/div>\n  );\n}\n\nfunction tkBtn(bg, color) {\n  return {\n    background: bg,\n    color,\n    border: \"1px solid #1e3a2f\",\n    borderRadius: 4,\n    padding: \"10px 0\",\n    fontFamily: \"'IBM Plex Mono', monospace\",\n    fontSize: 16,\n    fontWeight: 700,\n    cursor: \"pointer\",\n    textAlign: \"center\",\n  };\n}\n\nfunction FpsSelect({ value, onChange }) {\n  return (\n    <select\n      value={value.id}\n      onChange={e => onChange(FRAME_RATES.find(f => f.id === e.target.value))}\n      style={{\n        width: \"100%\",\n        background: \"#0d1a12\",\n        border: \"1px solid #1e3a2f\",\n        borderRadius: 4,\n        padding: \"10px 14px\",\n        color: \"#e0e0e0\",\n        fontFamily: \"inherit\",\n        fontSize: 13,\n        outline: \"none\",\n        cursor: \"pointer\",\n        boxSizing: \"border-box\",\n      }}\n    >\n      {FRAME_RATES.map(f => (\n        <option key={f.id} value={f.id}>\n          {f.label} fps {f.drop ? \"▸ Drop Frame\" : \"\"}\n        <\/option>\n      ))}\n    <\/select>\n  );\n}\n\nfunction ActionButton({ onClick, children }) {\n  return (\n    <button\n      onClick={onClick}\n      style={{\n        background: \"#00ff88\",\n        color: \"#0a0a0f\",\n        border: \"none\",\n        borderRadius: 4,\n        padding: \"12px 28px\",\n        fontFamily: \"inherit\",\n        fontSize: 12,\n        fontWeight: 700,\n        letterSpacing: \"0.2em\",\n        cursor: \"pointer\",\n        marginBottom: 20,\n        transition: \"opacity 0.15s\",\n        textTransform: \"uppercase\",\n      }}\n      onMouseEnter={e => e.target.style.opacity = \"0.85\"}\n      onMouseLeave={e => e.target.style.opacity = \"1\"}\n    >{children}<\/button>\n  );\n}\n\nfunction ErrorBox({ children }) {\n  return (\n    <div style={{\n      background: \"#1a0d0d\",\n      border: \"1px solid #ff4444\",\n      borderRadius: 4,\n      padding: \"10px 16px\",\n      color: \"#ff6666\",\n      fontSize: 12,\n      marginBottom: 16,\n      letterSpacing: \"0.05em\",\n    }}>⚠ {children}<\/div>\n  );\n}\n\nfunction ResultBox({ children }) {\n  return (\n    <div style={{\n      background: \"#0d1a12\",\n      border: \"1px solid #1e3a2f\",\n      borderRadius: 6,\n      padding: \"20px\",\n      marginTop: 4,\n    }}>{children}<\/div>\n  );\n}\n\nfunction ResultRow({ label, value, highlight }) {\n  return (\n    <div style={{\n      display: \"flex\",\n      justifyContent: \"space-between\",\n      alignItems: \"center\",\n      padding: \"8px 0\",\n      borderBottom: \"1px solid #112210\",\n    }}>\n      <span style={{ fontSize: 10, color: \"#446655\", letterSpacing: \"0.15em\", textTransform: \"uppercase\" }}>{label}<\/span>\n      <span style={{\n        fontSize: highlight ? 22 : 14,\n        color: highlight ? \"#00ff88\" : \"#c0c0c0\",\n        fontWeight: highlight ? 700 : 400,\n        letterSpacing: highlight ? \"0.15em\" : \"0.05em\",\n        textShadow: highlight ? \"0 0 16px #00ff8866\" : \"none\",\n      }}>{value}<\/span>\n    <\/div>\n  );\n}\n\n\/\/ FPS info data\nconst FPS_INFO = {\n  \"23976\": {\n    title: \"23.976 fps (23.98)\",\n    use: \"映画・シネマティックコンテンツ、Netflix等OTT配信、海外ドラマ\",\n    drop: \"ドロップフレームなし（Non-Drop）\",\n    note: \"24fpsを0.1%スローにした規格。NTSCとの親和性があり、映画的な質感を保ちながら配信に適している。\",\n    color: \"#6688ff\",\n  },\n  \"24\": {\n    title: \"24 fps\",\n    use: \"映画（フィルム）、劇場映画、映画的コンテンツ\",\n    drop: \"ドロップフレームなし（Non-Drop）\",\n    note: \"映画の標準規格。1秒に24コマの最も「映画らしい」フレームレート。\",\n    color: \"#aa66ff\",\n  },\n  \"25\": {\n    title: \"25 fps\",\n    use: \"PAL放送圏（ヨーロッパ・アジア等）、NHK等国内BS放送\",\n    drop: \"ドロップフレームなし（Non-Drop）\",\n    note: \"50Hz電源周波数に対応。欧州・日本の放送標準。\",\n    color: \"#44ccaa\",\n  },\n  \"2997nd\": {\n    title: \"29.97 fps Non-Drop\",\n    use: \"北米NTSC放送、収録・中間作業、素材保管\",\n    drop: \"ノンドロップフレーム（ND）\",\n    note: \"タイムコードと実時間が少しずつズレる。収録素材・編集途中によく使用。\",\n    color: \"#ffaa44\",\n  },\n  \"2997df\": {\n    title: \"29.97 fps Drop Frame\",\n    use: \"北米NTSC放送、TV番組最終納品、CM素材\",\n    drop: \"ドロップフレーム（DF）\",\n    note: \"タイムコードが実時間と一致するよう補正。放送納品の標準規格。毎分頭の00フレームと01フレームをスキップ（10分毎を除く）。\",\n    color: \"#ff6644\",\n  },\n  \"30\": {\n    title: \"30 fps\",\n    use: \"Web動画、YouTube、ゲーム映像、スポーツ\",\n    drop: \"ドロップフレームなし（Non-Drop）\",\n    note: \"29.97との混同に注意。インターネット配信やゲームコンテンツに多用。\",\n    color: \"#44aaff\",\n  },\n  \"50\": {\n    title: \"50 fps\",\n    use: \"PAL圏のスポーツ中継・ハイフレームレートコンテンツ\",\n    drop: \"ドロップフレームなし（Non-Drop）\",\n    note: \"25fpsの2倍。動きの激しいスポーツや高品質放送向け。\",\n    color: \"#44ccaa\",\n  },\n  \"5994nd\": {\n    title: \"59.94 fps Non-Drop\",\n    use: \"高フレームレート収録、スポーツ収録素材\",\n    drop: \"ノンドロップフレーム（ND）\",\n    note: \"29.97の2倍。高品質スポーツや4K HDRコンテンツの収録に使用。\",\n    color: \"#ffaa44\",\n  },\n  \"5994df\": {\n    title: \"59.94 fps Drop Frame\",\n    use: \"高フレームレート放送納品、スポーツ中継\",\n    drop: \"ドロップフレーム（DF）\",\n    note: \"59.94のドロップフレーム版。実時間と同期した高フレームレート放送素材。\",\n    color: \"#ff6644\",\n  },\n  \"60\": {\n    title: \"60 fps\",\n    use: \"ゲーム映像、Web高品質動画、VR\/AR\",\n    drop: \"ドロップフレームなし（Non-Drop）\",\n    note: \"最も滑らかな映像表現。ゲームやインタラクティブコンテンツに最適。\",\n    color: \"#44aaff\",\n  },\n};\n\nfunction FpsInfoCard({ fps }) {\n  const info = FPS_INFO[fps.id];\n  if (!info) return null;\n  return (\n    <div style={{\n      background: \"#0d1a12\",\n      border: `1px solid ${info.color}44`,\n      borderLeft: `4px solid ${info.color}`,\n      borderRadius: 6,\n      padding: 24,\n    }}>\n      <div style={{ fontSize: 18, fontWeight: 700, color: info.color, marginBottom: 16, letterSpacing: \"0.05em\" }}>\n        {info.title}\n      <\/div>\n      <InfoRow label=\"主な用途\" value={info.use} \/>\n      <InfoRow label=\"DF\/NDFタイプ\" value={info.drop} \/>\n      <InfoRow label=\"補足・注意事項\" value={info.note} \/>\n\n      <div style={{ marginTop: 20, padding: \"12px 16px\", background: \"#060e08\", borderRadius: 4, border: \"1px solid #1e3a2f\" }}>\n        <div style={{ fontSize: 10, color: \"#446655\", letterSpacing: \"0.2em\", marginBottom: 8 }}>1時間あたりのフレーム数<\/div>\n        <div style={{ fontSize: 20, color: info.color, fontWeight: 700 }}>\n          {(Math.round(fps.value) * 3600).toLocaleString()} frames\n        <\/div>\n        {fps.drop && (\n          <div style={{ fontSize: 10, color: \"#446655\", marginTop: 4 }}>\n            ※ DF補正後: {(Math.round(fps.value) * 3600 - (fps.value > 30 ? 4 : 2) * (60 * 60 - 6)).toLocaleString()} frames\n          <\/div>\n        )}\n      <\/div>\n    <\/div>\n  );\n}\n\nfunction btnStyle(bg, color, border) {\n  return {\n    background: bg,\n    color,\n    border: `1px solid ${border || bg}`,\n    borderRadius: 4,\n    padding: \"10px 20px\",\n    fontFamily: \"'IBM Plex Mono', 'Courier New', monospace\",\n    fontSize: 12,\n    fontWeight: 700,\n    letterSpacing: \"0.1em\",\n    cursor: \"pointer\",\n    transition: \"opacity 0.15s\",\n  };\n}\n\n\nfunction InfoRow({ label, value }) {\n  return (\n    <div style={{ marginBottom: 14 }}>\n      <div style={{ fontSize: 10, color: \"#446655\", letterSpacing: \"0.2em\", marginBottom: 4, textTransform: \"uppercase\" }}>{label}<\/div>\n      <div style={{ fontSize: 13, color: \"#c0c0c0\", lineHeight: 1.6 }}>{value}<\/div>\n    <\/div>\n  );\n}\n",
-  "stderr" : ""
+import { useState, useCallback, useRef, useEffect } from "react";
+
+// ── Timecode core logic ──────────────────────────────────────────────
+const FRAME_RATES = [
+  { label: "23.976", value: 23.976, drop: false, id: "23976" },
+  { label: "24", value: 24, drop: false, id: "24" },
+  { label: "25", value: 25, drop: false, id: "25" },
+  { label: "29.97 ND", value: 29.97, drop: false, id: "2997nd" },
+  { label: "29.97 DF", value: 29.97, drop: true, id: "2997df" },
+  { label: "30", value: 30, drop: false, id: "30" },
+  { label: "50", value: 50, drop: false, id: "50" },
+  { label: "59.94 ND", value: 59.94, drop: false, id: "5994nd" },
+  { label: "59.94 DF", value: 59.94, drop: true, id: "5994df" },
+  { label: "60", value: 60, drop: false, id: "60" },
+];
+
+function tcToFrames(tc, fps, drop) {
+  const roundFps = Math.round(fps);
+  const parts = tc.split(/[:;]/).map(Number);
+  if (parts.length !== 4) return null;
+  const [hh, mm, ss, ff] = parts;
+  if (isNaN(hh) || isNaN(mm) || isNaN(ss) || isNaN(ff)) return null;
+
+  let totalFrames = hh * 3600 * roundFps + mm * 60 * roundFps + ss * roundFps + ff;
+
+  if (drop) {
+    const dropFrames = roundFps === 30 ? 2 : 4;
+    const totalMinutes = 60 * hh + mm;
+    totalFrames -= dropFrames * (totalMinutes - Math.floor(totalMinutes / 10));
+  }
+  return totalFrames;
+}
+
+function framesToTc(frames, fps, drop) {
+  const roundFps = Math.round(fps);
+  if (frames < 0) frames = 0;
+
+  if (drop) {
+    const dropFrames = roundFps === 30 ? 2 : 4;
+    const framesPerMin = roundFps * 60 - dropFrames;
+    const framesPer10Min = roundFps * 600 - dropFrames * 9;
+    const d = Math.floor(frames / framesPer10Min);
+    const m = frames % framesPer10Min;
+    const adj = m < roundFps * 60
+      ? 0
+      : dropFrames + dropFrames * Math.floor((m - roundFps * 60) / framesPerMin);
+    frames += dropFrames * 9 * d + adj;
+  }
+
+  const ff = frames % roundFps;
+  frames = Math.floor(frames / roundFps);
+  const ss = frames % 60;
+  frames = Math.floor(frames / 60);
+  const mm = frames % 60;
+  const hh = Math.floor(frames / 60);
+  const sep = drop ? ";" : ":";
+  return [hh, mm, ss].map(n => String(n).padStart(2, "0")).join(":") + sep + String(ff).padStart(2, "0");
+}
+
+function framesToSec(frames, fps) {
+  return frames / fps;
+}
+
+function secToHms(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = (sec % 60).toFixed(3);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(Math.floor(s)).padStart(2, "0")}.${s.split(".")[1]}`;
+}
+
+function validateTc(tc) {
+  return /^\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2}$/.test(tc);
+}
+
+// ── Component ────────────────────────────────────────────────────────
+export default function TimecodeTool() {
+  // Converter state
+  const [convTc, setConvTc] = useState("00:00:00:00");
+  const [convFps, setConvFps] = useState(FRAME_RATES[4]); // 29.97 DF default
+  const [targetFps, setTargetFps] = useState(FRAME_RATES[2]); // 25
+  const [convResult, setConvResult] = useState(null);
+  const [convError, setConvError] = useState("");
+
+  // Duration calculator state
+  const [tcA, setTcA] = useState("00:00:00:00");
+  const [tcB, setTcB] = useState("00:00:00:00");
+  const [durFps, setDurFps] = useState(FRAME_RATES[4]);
+  const [durOp, setDurOp] = useState("+");
+  const [durResult, setDurResult] = useState(null);
+  const [durError, setDurError] = useState("");
+
+  // Active tab
+  const [tab, setTab] = useState("convert");
+
+  // ── Converter ──
+  const handleConvert = useCallback(() => {
+    setConvError("");
+    setConvResult(null);
+    if (!validateTc(convTc)) { setConvError("タイムコード形式が無効です（例: 01:23:45:12）"); return; }
+    const frames = tcToFrames(convTc, convFps.value, convFps.drop);
+    if (frames === null) { setConvError("変換エラー"); return; }
+    const realSec = framesToSec(frames, convFps.value);
+    const targetFrames = Math.round(realSec * targetFps.value);
+    const converted = framesToTc(targetFrames, targetFps.value, targetFps.drop);
+    setConvResult({ frames, realSec, converted, targetFrames });
+  }, [convTc, convFps, targetFps]);
+
+  // ── Duration calc ──
+  const handleDuration = useCallback(() => {
+    setDurError("");
+    setDurResult(null);
+    if (!validateTc(tcA)) { setDurError("タイムコードAが無効です"); return; }
+    if (!validateTc(tcB)) { setDurError("タイムコードBが無効です"); return; }
+    const fa = tcToFrames(tcA, durFps.value, durFps.drop);
+    const fb = tcToFrames(tcB, durFps.value, durFps.drop);
+    if (fa === null || fb === null) { setDurError("計算エラー"); return; }
+    const result = durOp === "+" ? fa + fb : fa - fb;
+    if (result < 0) { setDurError("結果がマイナスになります"); return; }
+    const tc = framesToTc(result, durFps.value, durFps.drop);
+    const sec = framesToSec(result, durFps.value);
+    setDurResult({ frames: result, tc, sec, hms: secToHms(sec) });
+  }, [tcA, tcB, durFps, durOp]);
+
+  // ── Frame Rate Info ──
+  const [infoFps, setInfoFps] = useState(FRAME_RATES[4]);
+
+  // ── Rundown Calculator ──
+  const DEFAULT_PRESETS = [
+    { id: 1, name: "CM①", sec: 180, color: "#ff6644" },
+    { id: 2, name: "CM②", sec: 120, color: "#ff6644" },
+    { id: 3, name: "提供", sec: 15, color: "#ffaa44" },
+    { id: 4, name: "提供（頭）", sec: 10, color: "#ffaa44" },
+  ];
+  const [rdFps, setRdFps] = useState(FRAME_RATES[4]);
+  const [rdStartTc, setRdStartTc] = useState("00:00:00:00");
+  const [rdPresets, setRdPresets] = useState(DEFAULT_PRESETS);
+  const [rdNewName, setRdNewName] = useState("");
+  const [rdNewSec, setRdNewSec] = useState("");
+  const [rdRows, setRdRows] = useState([]); // { label, durSec, startTc, endTc, cumSec }
+  const [rdSelectedPreset, setRdSelectedPreset] = useState(null);
+  const [rdCustomSec, setRdCustomSec] = useState("00:00:00:00");
+  const [rdError, setRdError] = useState("");
+
+  const secToTc = (sec, fps) => {
+    const frames = Math.round(sec * fps.value);
+    return framesToTc(frames, fps.value, fps.drop);
+  };
+
+  const addRdRow = (name, durSec) => {
+    setRdError("");
+    if (!validateTc(rdStartTc) && rdRows.length === 0) {
+      setRdError("開始タイムコードが無効です");
+      return;
+    }
+    const startFrames = rdRows.length === 0
+      ? tcToFrames(rdStartTc, rdFps.value, rdFps.drop)
+      : tcToFrames(rdRows[rdRows.length - 1].endTc, rdFps.value, rdFps.drop);
+    const durFrames = Math.round(durSec * rdFps.value);
+    const endFrames = startFrames + durFrames;
+    const cumSec = (rdRows.length > 0 ? rdRows[rdRows.length - 1].cumSec : 0) + durSec;
+    const newRow = {
+      id: Date.now(),
+      label: name,
+      durSec,
+      startTc: framesToTc(startFrames, rdFps.value, rdFps.drop),
+      endTc: framesToTc(endFrames, rdFps.value, rdFps.drop),
+      cumSec,
+    };
+    setRdRows(prev => [...prev, newRow]);
+  };
+
+  const removeRdRow = (id) => {
+    const idx = rdRows.findIndex(r => r.id === id);
+    if (idx === -1) return;
+    const removed = rdRows[idx];
+    const newRows = rdRows.filter(r => r.id !== id);
+    // recalculate from idx onwards
+    let recalc = [];
+    for (let i = 0; i < newRows.length; i++) {
+      if (i < idx) { recalc.push(newRows[i]); continue; }
+      const prevEnd = i === 0 ? rdStartTc : recalc[i - 1].endTc;
+      const startF = tcToFrames(prevEnd, rdFps.value, rdFps.drop);
+      const durF = Math.round(newRows[i].durSec * rdFps.value);
+      const cumSec = (i > 0 ? recalc[i - 1].cumSec : 0) + newRows[i].durSec;
+      recalc.push({
+        ...newRows[i],
+        startTc: framesToTc(startF, rdFps.value, rdFps.drop),
+        endTc: framesToTc(startF + durF, rdFps.value, rdFps.drop),
+        cumSec,
+      });
+    }
+    setRdRows(recalc);
+  };
+
+  const addPreset = () => {
+    if (!rdNewName.trim() || !rdNewSec || isNaN(Number(rdNewSec)) || Number(rdNewSec) <= 0) return;
+    setRdPresets(prev => [...prev, { id: Date.now(), name: rdNewName.trim(), sec: Number(rdNewSec), color: "#6688ff" }]);
+    setRdNewName(""); setRdNewSec("");
+  };
+
+  const removePreset = (id) => setRdPresets(prev => prev.filter(p => p.id !== id));
+
+  const fmtSec = (sec) => {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return m > 0 ? `${m}分${s > 0 ? s + "秒" : ""}` : `${s}秒`;
+  };
+
+
+  // ── Stopwatch ──
+  const [swFps, setSwFps] = useState(FRAME_RATES[4]);
+  const [swRunning, setSwRunning] = useState(false);
+  const [swElapsed, setSwElapsed] = useState(0); // ms
+  const [swLaps, setSwLaps] = useState([]); // { label, elapsed, lapTime }
+  const [swLapLabel, setSwLapLabel] = useState("");
+  const swStartRef = useRef(null);
+  const swBaseRef = useRef(0);
+  const swRafRef = useRef(null);
+
+  const swTick = useCallback(() => {
+    setSwElapsed(swBaseRef.current + (Date.now() - swStartRef.current));
+    swRafRef.current = requestAnimationFrame(swTick);
+  }, []);
+
+  const swStart = useCallback(() => {
+    swStartRef.current = Date.now();
+    setSwRunning(true);
+    swRafRef.current = requestAnimationFrame(swTick);
+  }, [swTick]);
+
+  const swStop = useCallback(() => {
+    cancelAnimationFrame(swRafRef.current);
+    swBaseRef.current = swBaseRef.current + (Date.now() - swStartRef.current);
+    setSwRunning(false);
+  }, []);
+
+  const swReset = useCallback(() => {
+    cancelAnimationFrame(swRafRef.current);
+    swBaseRef.current = 0;
+    swStartRef.current = null;
+    setSwRunning(false);
+    setSwElapsed(0);
+    setSwLaps([]);
+    setSwLapLabel("");
+  }, []);
+
+  const swLap = useCallback(() => {
+    const current = swBaseRef.current + (Date.now() - swStartRef.current);
+    const prevElapsed = swLaps.length > 0 ? swLaps[swLaps.length - 1].elapsed : 0;
+    setSwLaps(prev => [...prev, {
+      label: swLapLabel || `ラップ ${prev.length + 1}`,
+      elapsed: current,
+      lapTime: current - prevElapsed,
+    }]);
+    setSwLapLabel("");
+  }, [swLaps, swLapLabel]);
+
+  useEffect(() => () => cancelAnimationFrame(swRafRef.current), []);
+
+  function msToTc(ms, fps, drop) {
+    const frames = Math.floor(ms / 1000 * fps.value);
+    return framesToTc(frames, fps.value, fps.drop);
+  }
+
+  function msToDisplay(ms) {
+    const h = Math.floor(ms / 3600000);
+    const m = Math.floor((ms % 3600000) / 60000);
+    const s = Math.floor((ms % 60000) / 1000);
+    const cs = Math.floor((ms % 1000) / 10);
+    return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}.${String(cs).padStart(2,"0")}`;
+  }
+
+  return (
+    <div style={{
+      minHeight: "100vh",
+      background: "#0a0a0f",
+      fontFamily: "'IBM Plex Mono', 'Courier New', monospace",
+      color: "#e0e0e0",
+      padding: "0",
+    }}>
+      {/* Header */}
+      <header style={{
+        borderBottom: "1px solid #1e3a2f",
+        padding: "20px 32px",
+        display: "flex",
+        alignItems: "center",
+        gap: "16px",
+        background: "linear-gradient(180deg, #0d1a12 0%, #0a0a0f 100%)",
+      }}>
+        <div style={{
+          width: 36, height: 36,
+          border: "2px solid #00ff88",
+          borderRadius: 4,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 14, color: "#00ff88", fontWeight: 700,
+          boxShadow: "0 0 12px #00ff8844",
+        }}>TC</div>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: "#00ff88", letterSpacing: "0.1em" }}>
+            TIMECODE STUDIO
+          </div>
+          <div style={{ fontSize: 10, color: "#446655", letterSpacing: "0.25em" }}>
+            BROADCAST & POST-PRODUCTION TOOL
+          </div>
+        </div>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+          {["convert", "duration", "stopwatch", "rundown", "frameinfo"].map(t => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              style={{
+                padding: "6px 14px",
+                background: tab === t ? "#00ff88" : "transparent",
+                color: tab === t ? "#0a0a0f" : "#446655",
+                border: `1px solid ${tab === t ? "#00ff88" : "#1e3a2f"}`,
+                borderRadius: 3,
+                cursor: "pointer",
+                fontSize: 10,
+                fontFamily: "inherit",
+                fontWeight: 700,
+                letterSpacing: "0.1em",
+                transition: "all 0.15s",
+              }}
+            >
+              {t === "convert" ? "TC変換" : t === "duration" ? "尺計算" : t === "stopwatch" ? "原稿計測" : t === "rundown" ? "番組表計算" : "FPS情報"}
+            </button>
+          ))}
+        </div>
+      </header>
+
+      <main style={{ padding: "32px", maxWidth: 800, margin: "0 auto" }}>
+
+        {/* ── TC Converter ── */}
+        {tab === "convert" && (
+          <section>
+            <SectionTitle>タイムコード変換</SectionTitle>
+            <p style={{ color: "#446655", fontSize: 11, marginBottom: 24, letterSpacing: "0.1em" }}>
+              異なるフレームレート間でタイムコードを変換します
+            </p>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 16, alignItems: "end", marginBottom: 20 }}>
+              <div>
+                <Label>入力タイムコード</Label>
+                <TcInput value={convTc} onChange={setConvTc} />
+                <Label style={{ marginTop: 10 }}>フレームレート</Label>
+                <FpsSelect value={convFps} onChange={setConvFps} />
+              </div>
+              <div style={{ textAlign: "center", paddingBottom: 8, color: "#00ff88", fontSize: 20 }}>→</div>
+              <div>
+                <Label>変換先フレームレート</Label>
+                <FpsSelect value={targetFps} onChange={setTargetFps} />
+              </div>
+            </div>
+
+            <ActionButton onClick={handleConvert}>変換する</ActionButton>
+
+            {convError && <ErrorBox>{convError}</ErrorBox>}
+
+            {convResult && (
+              <ResultBox>
+                <ResultRow label="変換結果" value={convResult.converted} highlight />
+                <ResultRow label="元フレーム数" value={`${convResult.frames} frames`} />
+                <ResultRow label="実時間" value={`${convResult.realSec.toFixed(6)} 秒`} />
+                <ResultRow label="変換後フレーム数" value={`${convResult.targetFrames} frames`} />
+                <ResultRow label="HH:MM:SS.mmm" value={secToHms(convResult.realSec)} />
+              </ResultBox>
+            )}
+          </section>
+        )}
+
+        {/* ── Duration Calc ── */}
+        {tab === "duration" && (
+          <section>
+            <SectionTitle>尺計算（デュレーション）</SectionTitle>
+            <p style={{ color: "#446655", fontSize: 11, marginBottom: 24, letterSpacing: "0.1em" }}>
+              タイムコードの加算・減算を行います
+            </p>
+
+            <div style={{ marginBottom: 16 }}>
+              <Label>フレームレート</Label>
+              <FpsSelect value={durFps} onChange={setDurFps} />
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 12, alignItems: "center", marginBottom: 20 }}>
+              <div>
+                <Label>タイムコード A</Label>
+                <TcInput value={tcA} onChange={setTcA} />
+              </div>
+              <div style={{ textAlign: "center" }}>
+                <Label>演算</Label>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {["+", "-"].map(op => (
+                    <button
+                      key={op}
+                      onClick={() => setDurOp(op)}
+                      style={{
+                        width: 40, height: 40,
+                        background: durOp === op ? "#00ff88" : "#0d1a12",
+                        color: durOp === op ? "#0a0a0f" : "#00ff88",
+                        border: `1px solid #00ff88`,
+                        borderRadius: 3,
+                        cursor: "pointer",
+                        fontSize: 18,
+                        fontFamily: "inherit",
+                        fontWeight: 700,
+                        transition: "all 0.15s",
+                      }}
+                    >{op}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <Label>タイムコード B</Label>
+                <TcInput value={tcB} onChange={setTcB} />
+              </div>
+            </div>
+
+            <ActionButton onClick={handleDuration}>計算する</ActionButton>
+
+            {durError && <ErrorBox>{durError}</ErrorBox>}
+
+            {durResult && (
+              <ResultBox>
+                <ResultRow label="計算結果" value={durResult.tc} highlight />
+                <ResultRow label="総フレーム数" value={`${durResult.frames} frames`} />
+                <ResultRow label="実時間（秒）" value={`${durResult.sec.toFixed(6)} 秒`} />
+                <ResultRow label="HH:MM:SS.mmm" value={durResult.hms} />
+              </ResultBox>
+            )}
+          </section>
+        )}
+
+        {/* ── Stopwatch ── */}
+        {tab === "stopwatch" && (
+          <section>
+            <SectionTitle>原稿読み計測</SectionTitle>
+            <p style={{ color: "#446655", fontSize: 11, marginBottom: 24, letterSpacing: "0.1em" }}>
+              原稿のデュレーションをラップ記録つきで計測します
+            </p>
+
+            {/* FPS selector */}
+            <div style={{ marginBottom: 20 }}>
+              <Label>フレームレート</Label>
+              <FpsSelect value={swFps} onChange={setSwFps} />
+            </div>
+
+            {/* Main display */}
+            <div style={{
+              background: "#060e08",
+              border: "1px solid #1e3a2f",
+              borderRadius: 8,
+              padding: "28px 24px",
+              marginBottom: 20,
+              textAlign: "center",
+            }}>
+              <div style={{
+                fontSize: 52,
+                fontWeight: 700,
+                color: swRunning ? "#00ff88" : swElapsed > 0 ? "#aaeebb" : "#446655",
+                letterSpacing: "0.08em",
+                textShadow: swRunning ? "0 0 24px #00ff8866" : "none",
+                transition: "color 0.3s, text-shadow 0.3s",
+                fontVariantNumeric: "tabular-nums",
+                lineHeight: 1,
+                marginBottom: 12,
+              }}>
+                {msToDisplay(swElapsed)}
+              </div>
+              <div style={{
+                fontSize: 16,
+                color: swRunning ? "#446655" : "#2a4a3a",
+                letterSpacing: "0.2em",
+              }}>
+                {msToTc(swElapsed, swFps)}
+              </div>
+            </div>
+
+            {/* Controls */}
+            <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+              {!swRunning ? (
+                <button onClick={swStart} style={btnStyle("#00ff88", "#0a0a0f")}>
+                  {swElapsed > 0 ? "▶ 再開" : "▶ スタート"}
+                </button>
+              ) : (
+                <button onClick={swStop} style={btnStyle("#ffaa44", "#0a0a0f")}>
+                  ⏸ 一時停止
+                </button>
+              )}
+              {swRunning && (
+                <button onClick={swLap} style={btnStyle("transparent", "#00ff88", "#00ff88")}>
+                  ◎ ラップ記録
+                </button>
+              )}
+              <button onClick={swReset} style={btnStyle("transparent", "#446655", "#1e3a2f")}>
+                ↺ リセット
+              </button>
+            </div>
+
+            {/* Lap label input */}
+            {swRunning && (
+              <div style={{ marginBottom: 20 }}>
+                <Label>次のラップのラベル（任意）</Label>
+                <input
+                  value={swLapLabel}
+                  onChange={e => setSwLapLabel(e.target.value)}
+                  placeholder="例：導入部、Aパート、エンドロール..."
+                  style={{
+                    width: "100%",
+                    background: "#0d1a12",
+                    border: "1px solid #1e3a2f",
+                    borderRadius: 4,
+                    padding: "9px 14px",
+                    color: "#c0c0c0",
+                    fontFamily: "inherit",
+                    fontSize: 13,
+                    outline: "none",
+                    boxSizing: "border-box",
+                  }}
+                />
+              </div>
+            )}
+
+            {/* Lap list */}
+            {swLaps.length > 0 && (
+              <div style={{ background: "#0d1a12", border: "1px solid #1e3a2f", borderRadius: 6, overflow: "hidden" }}>
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "auto 1fr 1fr 1fr",
+                  gap: 0,
+                  padding: "8px 16px",
+                  borderBottom: "1px solid #1e3a2f",
+                }}>
+                  {["#", "ラベル", "ラップ尺", "累計"].map(h => (
+                    <div key={h} style={{ fontSize: 9, color: "#446655", letterSpacing: "0.2em", textTransform: "uppercase" }}>{h}</div>
+                  ))}
+                </div>
+                {swLaps.map((lap, i) => (
+                  <div key={i} style={{
+                    display: "grid",
+                    gridTemplateColumns: "auto 1fr 1fr 1fr",
+                    gap: 0,
+                    padding: "10px 16px",
+                    borderBottom: i < swLaps.length - 1 ? "1px solid #112210" : "none",
+                    background: i % 2 === 0 ? "transparent" : "#060e08",
+                  }}>
+                    <div style={{ fontSize: 11, color: "#446655", paddingRight: 16 }}>{i + 1}</div>
+                    <div style={{ fontSize: 12, color: "#c0c0c0" }}>{lap.label}</div>
+                    <div style={{ fontSize: 12, color: "#00ff88", fontWeight: 700 }}>
+                      {msToTc(lap.lapTime, swFps)}
+                      <div style={{ fontSize: 10, color: "#446655" }}>{msToDisplay(lap.lapTime)}</div>
+                    </div>
+                    <div style={{ fontSize: 12, color: "#aaeebb" }}>
+                      {msToTc(lap.elapsed, swFps)}
+                      <div style={{ fontSize: 10, color: "#446655" }}>{msToDisplay(lap.elapsed)}</div>
+                    </div>
+                  </div>
+                ))}
+                {/* Total */}
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "auto 1fr 1fr 1fr",
+                  gap: 0,
+                  padding: "12px 16px",
+                  borderTop: "2px solid #1e3a2f",
+                  background: "#060e08",
+                }}>
+                  <div />
+                  <div style={{ fontSize: 10, color: "#446655", letterSpacing: "0.15em" }}>TOTAL</div>
+                  <div />
+                  <div style={{ fontSize: 14, color: "#00ff88", fontWeight: 700 }}>
+                    {msToTc(swElapsed, swFps)}
+                    <div style={{ fontSize: 10, color: "#446655" }}>{msToDisplay(swElapsed)}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+
+        {/* ── Rundown Calculator ── */}
+        {tab === "rundown" && (
+          <section>
+            <SectionTitle>番組表計算</SectionTitle>
+            <p style={{ color: "#446655", fontSize: 11, marginBottom: 24, letterSpacing: "0.1em" }}>
+              CM・提供の尺を順番に積み上げて、各タイムコードを自動計算します
+            </p>
+
+            {/* Settings row */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 24 }}>
+              <div>
+                <Label>フレームレート</Label>
+                <FpsSelect value={rdFps} onChange={setRdFps} />
+              </div>
+              <div>
+                <Label>開始タイムコード</Label>
+                <TcInput value={rdStartTc} onChange={setRdStartTc} />
+              </div>
+            </div>
+
+            {/* Presets */}
+            <div style={{ background: "#0d1a12", border: "1px solid #1e3a2f", borderRadius: 6, padding: 16, marginBottom: 20 }}>
+              <Label>プリセット尺</Label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+                {rdPresets.map(p => (
+                  <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 0 }}>
+                    <button
+                      onClick={() => addRdRow(p.name, p.sec)}
+                      style={{
+                        background: "#060e08",
+                        color: p.color,
+                        border: `1px solid ${p.color}66`,
+                        borderRight: "none",
+                        borderRadius: "4px 0 0 4px",
+                        padding: "7px 14px",
+                        fontFamily: "inherit",
+                        fontSize: 12,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                        letterSpacing: "0.05em",
+                      }}
+                    >
+                      {p.name} <span style={{ color: "#446655", fontWeight: 400 }}>{fmtSec(p.sec)}</span>
+                    </button>
+                    <button
+                      onClick={() => removePreset(p.id)}
+                      style={{
+                        background: "#060e08",
+                        color: "#446655",
+                        border: `1px solid ${p.color}66`,
+                        borderRadius: "0 4px 4px 0",
+                        padding: "7px 8px",
+                        fontFamily: "inherit",
+                        fontSize: 11,
+                        cursor: "pointer",
+                      }}
+                    >✕</button>
+                  </div>
+                ))}
+              </div>
+
+              {/* Add preset */}
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input
+                  value={rdNewName}
+                  onChange={e => setRdNewName(e.target.value)}
+                  placeholder="名前（例：CM③）"
+                  style={{ flex: 2, background: "#060e08", border: "1px solid #1e3a2f", borderRadius: 4, padding: "7px 12px", color: "#c0c0c0", fontFamily: "inherit", fontSize: 12, outline: "none" }}
+                />
+                <input
+                  value={rdNewSec}
+                  onChange={e => setRdNewSec(e.target.value)}
+                  placeholder="秒数（例：90）"
+                  type="number"
+                  min="1"
+                  style={{ flex: 1, background: "#060e08", border: "1px solid #1e3a2f", borderRadius: 4, padding: "7px 12px", color: "#c0c0c0", fontFamily: "inherit", fontSize: 12, outline: "none" }}
+                />
+                <button
+                  onClick={addPreset}
+                  style={{ background: "#1e3a2f", color: "#00ff88", border: "1px solid #00ff8844", borderRadius: 4, padding: "7px 14px", fontFamily: "inherit", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+                >＋ 追加</button>
+              </div>
+            </div>
+
+            {/* Manual add */}
+            <div style={{ background: "#0d1a12", border: "1px solid #1e3a2f", borderRadius: 6, padding: 16, marginBottom: 20 }}>
+              <Label>手動で追加（タイムコードで尺を指定）</Label>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <div style={{ flex: 1 }}>
+                  <TcInput value={rdCustomSec} onChange={setRdCustomSec} />
+                </div>
+                <button
+                  onClick={() => {
+                    if (!validateTc(rdCustomSec)) return;
+                    const frames = tcToFrames(rdCustomSec, rdFps.value, rdFps.drop);
+                    if (!frames || frames <= 0) return;
+                    const sec = frames / rdFps.value;
+                    addRdRow(`手動 ${rdCustomSec}`, sec);
+                    setRdCustomSec("00:00:00:00");
+                  }}
+                  style={{ background: "#00ff88", color: "#0a0a0f", border: "none", borderRadius: 4, padding: "9px 20px", fontFamily: "inherit", fontSize: 12, fontWeight: 700, cursor: "pointer", letterSpacing: "0.1em", whiteSpace: "nowrap" }}
+                >追加</button>
+              </div>
+            </div>
+
+            {rdError && <ErrorBox>{rdError}</ErrorBox>}
+
+            {/* Rundown table */}
+            {rdRows.length > 0 && (
+              <div style={{ background: "#0d1a12", border: "1px solid #1e3a2f", borderRadius: 6, overflow: "hidden", marginBottom: 16 }}>
+                {/* Header */}
+                <div style={{ display: "grid", gridTemplateColumns: "auto 1fr 80px 1fr 1fr 36px", gap: 0, padding: "8px 16px", borderBottom: "1px solid #1e3a2f", background: "#060e08" }}>
+                  {["#", "区分", "尺", "IN", "OUT", ""].map((h, i) => (
+                    <div key={i} style={{ fontSize: 9, color: "#446655", letterSpacing: "0.2em", textTransform: "uppercase" }}>{h}</div>
+                  ))}
+                </div>
+                {rdRows.map((row, i) => (
+                  <div key={row.id} style={{
+                    display: "grid",
+                    gridTemplateColumns: "auto 1fr 80px 1fr 1fr 36px",
+                    gap: 0,
+                    padding: "11px 16px",
+                    borderBottom: i < rdRows.length - 1 ? "1px solid #112210" : "none",
+                    background: i % 2 === 0 ? "transparent" : "#060e08",
+                    alignItems: "center",
+                  }}>
+                    <div style={{ fontSize: 11, color: "#446655", paddingRight: 12 }}>{i + 1}</div>
+                    <div style={{ fontSize: 13, color: "#e0e0e0", fontWeight: 700 }}>{row.label}</div>
+                    <div style={{ fontSize: 12, color: "#ffaa44" }}>{fmtSec(row.durSec)}</div>
+                    <div style={{ fontSize: 12, color: "#aaeebb", letterSpacing: "0.05em" }}>{row.startTc}</div>
+                    <div style={{ fontSize: 13, color: "#00ff88", fontWeight: 700, letterSpacing: "0.05em", textShadow: "0 0 8px #00ff8844" }}>{row.endTc}</div>
+                    <button
+                      onClick={() => removeRdRow(row.id)}
+                      style={{ background: "transparent", color: "#446655", border: "none", cursor: "pointer", fontSize: 14, padding: "2px 6px" }}
+                    >✕</button>
+                  </div>
+                ))}
+                {/* Total row */}
+                <div style={{ display: "grid", gridTemplateColumns: "auto 1fr 80px 1fr 1fr 36px", gap: 0, padding: "12px 16px", borderTop: "2px solid #1e3a2f", background: "#060e08", alignItems: "center" }}>
+                  <div />
+                  <div style={{ fontSize: 10, color: "#446655", letterSpacing: "0.2em" }}>TOTAL</div>
+                  <div style={{ fontSize: 13, color: "#ffaa44", fontWeight: 700 }}>{fmtSec(rdRows[rdRows.length - 1].cumSec)}</div>
+                  <div />
+                  <div style={{ fontSize: 15, color: "#00ff88", fontWeight: 700, textShadow: "0 0 12px #00ff8866" }}>
+                    {rdRows[rdRows.length - 1].endTc}
+                  </div>
+                  <div />
+                </div>
+              </div>
+            )}
+
+            {rdRows.length > 0 && (
+              <button
+                onClick={() => setRdRows([])}
+                style={{ background: "transparent", color: "#446655", border: "1px solid #1e3a2f", borderRadius: 4, padding: "8px 16px", fontFamily: "inherit", fontSize: 11, cursor: "pointer", letterSpacing: "0.1em" }}
+              >↺ 表をリセット</button>
+            )}
+          </section>
+        )}
+
+        {tab === "frameinfo" && (
+          <section>
+            <SectionTitle>フレームレート情報</SectionTitle>
+            <p style={{ color: "#446655", fontSize: 11, marginBottom: 24, letterSpacing: "0.1em" }}>
+              各フレームレートの特性と使用シーンを確認できます
+            </p>
+
+            <div style={{ marginBottom: 24 }}>
+              <Label>フレームレートを選択</Label>
+              <FpsSelect value={infoFps} onChange={setInfoFps} />
+            </div>
+
+            <FpsInfoCard fps={infoFps} />
+          </section>
+        )}
+      </main>
+    </div>
+  );
+}
+
+// ── Sub-components ───────────────────────────────────────────────────
+
+function SectionTitle({ children }) {
+  return (
+    <h2 style={{
+      fontSize: 13,
+      fontWeight: 700,
+      color: "#00ff88",
+      letterSpacing: "0.2em",
+      borderLeft: "3px solid #00ff88",
+      paddingLeft: 12,
+      marginBottom: 8,
+      textTransform: "uppercase",
+    }}>{children}</h2>
+  );
+}
+
+function Label({ children, style }) {
+  return (
+    <div style={{
+      fontSize: 10,
+      color: "#446655",
+      letterSpacing: "0.2em",
+      marginBottom: 6,
+      textTransform: "uppercase",
+      ...style,
+    }}>{children}</div>
+  );
+}
+
+// 数字8桁 → "HH:MM:SS:FF" に自動フォーマット
+function formatTcInput(digits) {
+  const d = digits.padStart(8, "0");
+  return `${d.slice(0,2)}:${d.slice(2,4)}:${d.slice(4,6)}:${d.slice(6,8)}`;
+}
+
+function TcInput({ value, onChange, drop }) {
+  const [showPad, setShowPad] = useState(false);
+  const [digits, setDigits] = useState("00000000");
+  const padRef = useRef(null);
+
+  // 外部valueが変わったとき digits を同期
+  useEffect(() => {
+    const raw = value.replace(/[^0-9]/g, "").slice(0, 8).padStart(8, "0");
+    setDigits(raw);
+  }, [value]);
+
+  // パッド外クリックで閉じる
+  useEffect(() => {
+    if (!showPad) return;
+    const handler = (e) => {
+      if (padRef.current && !padRef.current.contains(e.target)) setShowPad(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showPad]);
+
+  const pushDigit = (d) => {
+    const next = (digits + d).slice(-8);
+    setDigits(next);
+    onChange(formatTcInput(next));
+  };
+
+  const backspace = () => {
+    const next = ("0" + digits.slice(0, 7)).padStart(8, "0");
+    setDigits(next);
+    onChange(formatTcInput(next));
+  };
+
+  const clear = () => {
+    setDigits("00000000");
+    onChange("00:00:00:00");
+  };
+
+  const handleKeyInput = (e) => {
+    const raw = e.target.value.replace(/[^0-9]/g, "").slice(0, 8);
+    const next = raw.padStart(8, "0");
+    setDigits(next);
+    onChange(formatTcInput(next));
+  };
+
+  const sep = drop ? ";" : ":";
+  const display = formatTcInput(digits).replace(/:/g, sep);
+
+  return (
+    <div style={{ position: "relative" }} ref={padRef}>
+      <div style={{ display: "flex", gap: 0 }}>
+        <input
+          value={display}
+          onChange={handleKeyInput}
+          placeholder={`00${sep}00${sep}00${sep}00`}
+          style={{
+            flex: 1,
+            background: "#0d1a12",
+            border: "1px solid #1e3a2f",
+            borderRight: "none",
+            borderRadius: "4px 0 0 4px",
+            padding: "10px 14px",
+            color: "#00ff88",
+            fontFamily: "inherit",
+            fontSize: 18,
+            letterSpacing: "0.15em",
+            outline: "none",
+            boxSizing: "border-box",
+          }}
+          onFocus={e => e.target.style.borderColor = "#00ff88"}
+          onBlur={e => e.target.style.borderColor = "#1e3a2f"}
+        />
+        <button
+          onMouseDown={e => { e.preventDefault(); setShowPad(v => !v); }}
+          style={{
+            background: showPad ? "#00ff88" : "#0d1a12",
+            color: showPad ? "#0a0a0f" : "#446655",
+            border: "1px solid #1e3a2f",
+            borderRadius: "0 4px 4px 0",
+            padding: "0 12px",
+            cursor: "pointer",
+            fontSize: 16,
+            fontFamily: "inherit",
+          }}
+          title="テンキー入力"
+        >⌨</button>
+      </div>
+
+      {/* Tenkey Pad */}
+      {showPad && (
+        <div style={{
+          position: "absolute",
+          top: "calc(100% + 6px)",
+          left: 0,
+          zIndex: 100,
+          background: "#0d1a12",
+          border: "1px solid #00ff8844",
+          borderRadius: 8,
+          padding: 12,
+          boxShadow: "0 8px 32px #00000088",
+          width: 200,
+        }}>
+          {/* Display */}
+          <div style={{
+            background: "#060e08",
+            border: "1px solid #1e3a2f",
+            borderRadius: 4,
+            padding: "8px 12px",
+            marginBottom: 10,
+            textAlign: "right",
+            fontSize: 20,
+            color: "#00ff88",
+            letterSpacing: "0.15em",
+            fontWeight: 700,
+          }}>
+            {display}
+          </div>
+          {/* Keys */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+            {[7,8,9,4,5,6,1,2,3].map(n => (
+              <button key={n} onClick={() => pushDigit(String(n))} style={tkBtn("#0d1a12", "#e0e0e0")}>
+                {n}
+              </button>
+            ))}
+            <button onClick={clear} style={tkBtn("#1a0d0d", "#ff6644")}>C</button>
+            <button onClick={() => pushDigit("0")} style={tkBtn("#0d1a12", "#e0e0e0")}>0</button>
+            <button onClick={backspace} style={tkBtn("#1a1a0d", "#ffaa44")}>⌫</button>
+          </div>
+          <button
+            onClick={() => setShowPad(false)}
+            style={{ ...tkBtn("#1e3a2f", "#00ff88"), width: "100%", marginTop: 8, letterSpacing: "0.1em", fontSize: 11 }}
+          >確定 ✓</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function tkBtn(bg, color) {
+  return {
+    background: bg,
+    color,
+    border: "1px solid #1e3a2f",
+    borderRadius: 4,
+    padding: "10px 0",
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 16,
+    fontWeight: 700,
+    cursor: "pointer",
+    textAlign: "center",
+  };
+}
+
+function FpsSelect({ value, onChange }) {
+  return (
+    <select
+      value={value.id}
+      onChange={e => onChange(FRAME_RATES.find(f => f.id === e.target.value))}
+      style={{
+        width: "100%",
+        background: "#0d1a12",
+        border: "1px solid #1e3a2f",
+        borderRadius: 4,
+        padding: "10px 14px",
+        color: "#e0e0e0",
+        fontFamily: "inherit",
+        fontSize: 13,
+        outline: "none",
+        cursor: "pointer",
+        boxSizing: "border-box",
+      }}
+    >
+      {FRAME_RATES.map(f => (
+        <option key={f.id} value={f.id}>
+          {f.label} fps {f.drop ? "▸ Drop Frame" : ""}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function ActionButton({ onClick, children }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        background: "#00ff88",
+        color: "#0a0a0f",
+        border: "none",
+        borderRadius: 4,
+        padding: "12px 28px",
+        fontFamily: "inherit",
+        fontSize: 12,
+        fontWeight: 700,
+        letterSpacing: "0.2em",
+        cursor: "pointer",
+        marginBottom: 20,
+        transition: "opacity 0.15s",
+        textTransform: "uppercase",
+      }}
+      onMouseEnter={e => e.target.style.opacity = "0.85"}
+      onMouseLeave={e => e.target.style.opacity = "1"}
+    >{children}</button>
+  );
+}
+
+function ErrorBox({ children }) {
+  return (
+    <div style={{
+      background: "#1a0d0d",
+      border: "1px solid #ff4444",
+      borderRadius: 4,
+      padding: "10px 16px",
+      color: "#ff6666",
+      fontSize: 12,
+      marginBottom: 16,
+      letterSpacing: "0.05em",
+    }}>⚠ {children}</div>
+  );
+}
+
+function ResultBox({ children }) {
+  return (
+    <div style={{
+      background: "#0d1a12",
+      border: "1px solid #1e3a2f",
+      borderRadius: 6,
+      padding: "20px",
+      marginTop: 4,
+    }}>{children}</div>
+  );
+}
+
+function ResultRow({ label, value, highlight }) {
+  return (
+    <div style={{
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "8px 0",
+      borderBottom: "1px solid #112210",
+    }}>
+      <span style={{ fontSize: 10, color: "#446655", letterSpacing: "0.15em", textTransform: "uppercase" }}>{label}</span>
+      <span style={{
+        fontSize: highlight ? 22 : 14,
+        color: highlight ? "#00ff88" : "#c0c0c0",
+        fontWeight: highlight ? 700 : 400,
+        letterSpacing: highlight ? "0.15em" : "0.05em",
+        textShadow: highlight ? "0 0 16px #00ff8866" : "none",
+      }}>{value}</span>
+    </div>
+  );
+}
+
+// FPS info data
+const FPS_INFO = {
+  "23976": {
+    title: "23.976 fps (23.98)",
+    use: "映画・シネマティックコンテンツ、Netflix等OTT配信、海外ドラマ",
+    drop: "ドロップフレームなし（Non-Drop）",
+    note: "24fpsを0.1%スローにした規格。NTSCとの親和性があり、映画的な質感を保ちながら配信に適している。",
+    color: "#6688ff",
+  },
+  "24": {
+    title: "24 fps",
+    use: "映画（フィルム）、劇場映画、映画的コンテンツ",
+    drop: "ドロップフレームなし（Non-Drop）",
+    note: "映画の標準規格。1秒に24コマの最も「映画らしい」フレームレート。",
+    color: "#aa66ff",
+  },
+  "25": {
+    title: "25 fps",
+    use: "PAL放送圏（ヨーロッパ・アジア等）、NHK等国内BS放送",
+    drop: "ドロップフレームなし（Non-Drop）",
+    note: "50Hz電源周波数に対応。欧州・日本の放送標準。",
+    color: "#44ccaa",
+  },
+  "2997nd": {
+    title: "29.97 fps Non-Drop",
+    use: "北米NTSC放送、収録・中間作業、素材保管",
+    drop: "ノンドロップフレーム（ND）",
+    note: "タイムコードと実時間が少しずつズレる。収録素材・編集途中によく使用。",
+    color: "#ffaa44",
+  },
+  "2997df": {
+    title: "29.97 fps Drop Frame",
+    use: "北米NTSC放送、TV番組最終納品、CM素材",
+    drop: "ドロップフレーム（DF）",
+    note: "タイムコードが実時間と一致するよう補正。放送納品の標準規格。毎分頭の00フレームと01フレームをスキップ（10分毎を除く）。",
+    color: "#ff6644",
+  },
+  "30": {
+    title: "30 fps",
+    use: "Web動画、YouTube、ゲーム映像、スポーツ",
+    drop: "ドロップフレームなし（Non-Drop）",
+    note: "29.97との混同に注意。インターネット配信やゲームコンテンツに多用。",
+    color: "#44aaff",
+  },
+  "50": {
+    title: "50 fps",
+    use: "PAL圏のスポーツ中継・ハイフレームレートコンテンツ",
+    drop: "ドロップフレームなし（Non-Drop）",
+    note: "25fpsの2倍。動きの激しいスポーツや高品質放送向け。",
+    color: "#44ccaa",
+  },
+  "5994nd": {
+    title: "59.94 fps Non-Drop",
+    use: "高フレームレート収録、スポーツ収録素材",
+    drop: "ノンドロップフレーム（ND）",
+    note: "29.97の2倍。高品質スポーツや4K HDRコンテンツの収録に使用。",
+    color: "#ffaa44",
+  },
+  "5994df": {
+    title: "59.94 fps Drop Frame",
+    use: "高フレームレート放送納品、スポーツ中継",
+    drop: "ドロップフレーム（DF）",
+    note: "59.94のドロップフレーム版。実時間と同期した高フレームレート放送素材。",
+    color: "#ff6644",
+  },
+  "60": {
+    title: "60 fps",
+    use: "ゲーム映像、Web高品質動画、VR/AR",
+    drop: "ドロップフレームなし（Non-Drop）",
+    note: "最も滑らかな映像表現。ゲームやインタラクティブコンテンツに最適。",
+    color: "#44aaff",
+  },
+};
+
+function FpsInfoCard({ fps }) {
+  const info = FPS_INFO[fps.id];
+  if (!info) return null;
+  return (
+    <div style={{
+      background: "#0d1a12",
+      border: `1px solid ${info.color}44`,
+      borderLeft: `4px solid ${info.color}`,
+      borderRadius: 6,
+      padding: 24,
+    }}>
+      <div style={{ fontSize: 18, fontWeight: 700, color: info.color, marginBottom: 16, letterSpacing: "0.05em" }}>
+        {info.title}
+      </div>
+      <InfoRow label="主な用途" value={info.use} />
+      <InfoRow label="DF/NDFタイプ" value={info.drop} />
+      <InfoRow label="補足・注意事項" value={info.note} />
+
+      <div style={{ marginTop: 20, padding: "12px 16px", background: "#060e08", borderRadius: 4, border: "1px solid #1e3a2f" }}>
+        <div style={{ fontSize: 10, color: "#446655", letterSpacing: "0.2em", marginBottom: 8 }}>1時間あたりのフレーム数</div>
+        <div style={{ fontSize: 20, color: info.color, fontWeight: 700 }}>
+          {(Math.round(fps.value) * 3600).toLocaleString()} frames
+        </div>
+        {fps.drop && (
+          <div style={{ fontSize: 10, color: "#446655", marginTop: 4 }}>
+            ※ DF補正後: {(Math.round(fps.value) * 3600 - (fps.value > 30 ? 4 : 2) * (60 * 60 - 6)).toLocaleString()} frames
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function btnStyle(bg, color, border) {
+  return {
+    background: bg,
+    color,
+    border: `1px solid ${border || bg}`,
+    borderRadius: 4,
+    padding: "10px 20px",
+    fontFamily: "'IBM Plex Mono', 'Courier New', monospace",
+    fontSize: 12,
+    fontWeight: 700,
+    letterSpacing: "0.1em",
+    cursor: "pointer",
+    transition: "opacity 0.15s",
+  };
+}
+
+
+function InfoRow({ label, value }) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 10, color: "#446655", letterSpacing: "0.2em", marginBottom: 4, textTransform: "uppercase" }}>{label}</div>
+      <div style={{ fontSize: 13, color: "#c0c0c0", lineHeight: 1.6 }}>{value}</div>
+    </div>
+  );
 }
